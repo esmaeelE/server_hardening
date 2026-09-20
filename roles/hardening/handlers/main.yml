@@ -1,0 +1,15 @@
+---
+- name: Restart ssh
+  ansible.builtin.systemd:
+    name: ssh
+    state: reloaded
+
+- name: Restart nftables
+  ansible.builtin.systemd:
+    name: nftables
+    state: restarted
+
+- name: Restart fail2ban
+  ansible.builtin.systemd:
+    name: fail2ban
+    state: restarted

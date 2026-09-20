@@ -1,0 +1,167 @@
+---
+- name: Install hardening packages
+  ansible.builtin.apt:
+    name: "{{ hardening_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Ensure SSH configuration directory exists
+  ansible.builtin.file:
+    path: /etc/ssh/sshd_config.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Configure SSH hardening
+  ansible.builtin.copy:
+    dest: /etc/ssh/sshd_config.d/99-hardening.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Managed by Ansible
+      Port {{ ssh_port }}
+      PubkeyAuthentication {{ ssh_pubkey_authentication }}
+      PasswordAuthentication {{ ssh_password_authentication }}
+      KbdInteractiveAuthentication {{ ssh_kbd_interactive_authentication }}
+      PermitEmptyPasswords no
+      PermitRootLogin {{ ssh_permit_root_login }}
+      MaxAuthTries {{ ssh_max_auth_tries }}
+      MaxSessions {{ ssh_max_sessions }}
+      MaxStartups {{ ssh_max_startups }}
+      X11Forwarding {{ ssh_x11_forwarding }}
+      AllowAgentForwarding {{ ssh_allow_agent_forwarding }}
+      AllowTcpForwarding {{ ssh_allow_tcp_forwarding }}
+      PermitUserEnvironment {{ ssh_permit_user_environment }}
+      ClientAliveInterval {{ ssh_client_alive_interval }}
+      ClientAliveCountMax {{ ssh_client_alive_count_max }}
+  notify: Restart ssh
+
+- name: Validate SSH configuration
+  ansible.builtin.command:
+    cmd: sshd -t
+  changed_when: false
+
+- name: Configure nftables
+  ansible.builtin.copy:
+    dest: /etc/nftables.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      #!/usr/sbin/nft -f
+      # Managed by Ansible
+      flush ruleset
+
+      table inet filter {
+          chain input {
+              type filter hook input priority filter;
+              policy drop;
+
+              iifname "lo" accept
+              ct state established,related accept
+              ct state invalid drop
+              ip protocol icmp accept
+              ip6 nexthdr icmpv6 accept
+              tcp dport {{ firewall_ssh_port }} ct state new accept
+          }
+
+          chain forward {
+              type filter hook forward priority filter;
+              policy drop;
+          }
+
+          chain output {
+              type filter hook output priority filter;
+              policy accept;
+          }
+      }
+  notify: Restart nftables
+
+- name: Validate nftables configuration
+  ansible.builtin.command:
+    cmd: nft -c -f /etc/nftables.conf
+  changed_when: false
+
+- name: Enable nftables
+  ansible.builtin.systemd:
+    name: nftables
+    enabled: true
+    state: started
+
+- name: Enable SSH service
+  ansible.builtin.systemd:
+    name: ssh
+    enabled: true
+    state: started
+
+- name: Configure automatic updates
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/20auto-upgrades
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+
+- name: Configure unattended-upgrades
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/52unattended-upgrades-local
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      // Managed by Ansible
+      Unattended-Upgrade::Automatic-Reboot "false";
+
+- name: Enable unattended-upgrades
+  ansible.builtin.systemd:
+    name: unattended-upgrades
+    enabled: true
+    state: started
+
+- name: Configure Fail2ban
+  ansible.builtin.copy:
+    dest: /etc/fail2ban/jail.d/sshd.local
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [sshd]
+      enabled = true
+      backend = systemd
+      port = {{ ssh_port }}
+      maxretry = 5
+      findtime = 10m
+      bantime = 1h
+  notify: Restart fail2ban
+
+- name: Enable Fail2ban
+  ansible.builtin.systemd:
+    name: fail2ban
+    enabled: true
+    state: started
+
+- name: Verify effective SSH configuration
+  ansible.builtin.command:
+    cmd: sshd -T
+  register: sshd_effective_config
+  changed_when: false
+
+- name: Assert SSH password authentication is disabled
+  ansible.builtin.assert:
+    that:
+      - "'passwordauthentication no' in sshd_effective_config.stdout"
+
+- name: Assert root SSH login is disabled
+  ansible.builtin.assert:
+    that:
+      - "'permitrootlogin no' in sshd_effective_config.stdout"
+
+- name: Assert public key authentication is enabled
+  ansible.builtin.assert:
+    that:
+      - "'pubkeyauthentication yes' in sshd_effective_config.stdout"
